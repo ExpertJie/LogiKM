@@ -1,8 +1,16 @@
 package com.xiaojukeji.kafka.manager.service.service.impl;
 
+import com.alibaba.fastjson.JSONObject;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.huobi.exchange.OrderSequence;
+import com.huobi.jasmine.exchange.contract.entity.MatchResult;
+import com.huobi.jasmine.exchange.contract.utils.MatchResultUtil;
+import com.huobi.message.exchange.protocol.MatchResultProtocol;
+import com.huobi.order.action.protocol.OrderSequenceProtocol;
 import com.xiaojukeji.kafka.manager.common.bizenum.TopicOffsetChangedEnum;
 import com.xiaojukeji.kafka.manager.common.entity.Result;
 import com.xiaojukeji.kafka.manager.common.entity.ResultStatus;
+import com.xiaojukeji.kafka.manager.common.entity.dto.normal.TopicDataSampleV2DTO;
 import com.xiaojukeji.kafka.manager.common.entity.pojo.gateway.AppDO;
 import com.xiaojukeji.kafka.manager.common.bizenum.OffsetPosEnum;
 import com.xiaojukeji.kafka.manager.common.constant.Constant;
@@ -129,7 +137,7 @@ public class TopicServiceImpl implements TopicService {
                 MetricsConvertUtils.convert2TopicMetricsList(topicAppIdMetricsDOList);
 
         Map<Long, TopicMetricsDTO> dtoMap = new TreeMap<>();
-        for (TopicMetrics metrics: topicMetricsList) {
+        for (TopicMetrics metrics : topicMetricsList) {
             Long timestamp = metrics.getSpecifiedMetrics(JmxConstant.CREATE_TIME, Long.class);
             if (ValidateUtils.isNull(timestamp)) {
                 continue;
@@ -144,7 +152,7 @@ public class TopicServiceImpl implements TopicService {
             dto.setGmtCreate(timestamp * 1000 * 60);
             dtoMap.put(timestamp, dto);
         }
-        for (TopicThrottledMetricsDO data: topicThrottleDOList) {
+        for (TopicThrottledMetricsDO data : topicThrottleDOList) {
             Long timestamp = (data.getGmtCreate().getTime() / 1000 / 60);
             TopicMetricsDTO dto = dtoMap.getOrDefault(timestamp, new TopicMetricsDTO());
             dto.setConsumeThrottled(data.getFetchThrottled() > 0);
@@ -152,7 +160,7 @@ public class TopicServiceImpl implements TopicService {
             dto.setGmtCreate(timestamp * 1000 * 60);
             dtoMap.put(timestamp, dto);
         }
-        for (TopicMetrics metrics: topicAppIdMetricsList) {
+        for (TopicMetrics metrics : topicAppIdMetricsList) {
             Long timestamp = metrics.getSpecifiedMetrics(JmxConstant.CREATE_TIME, Long.class);
             if (ValidateUtils.isNull(timestamp)) {
                 continue;
@@ -232,7 +240,7 @@ public class TopicServiceImpl implements TopicService {
         if (!ValidateUtils.isNull(topicDO)) {
             basicDTO.setDescription(topicDO.getDescription());
         }
-        AppDO appDO = ValidateUtils.isNull(topicDO)? null: appService.getByAppId(topicDO.getAppId());
+        AppDO appDO = ValidateUtils.isNull(topicDO) ? null : appService.getByAppId(topicDO.getAppId());
         if (!ValidateUtils.isNull(appDO)) {
             basicDTO.setAppId(appDO.getAppId());
             basicDTO.setAppName(appDO.getName());
@@ -575,6 +583,22 @@ public class TopicServiceImpl implements TopicService {
         return new ArrayList<>();
     }
 
+    @Override
+    public List<String> fetchTopicData(ClusterDO clusterDO, String topicName, TopicDataSampleV2DTO reqObj) {
+        KafkaConsumer kafkaConsumer = null;
+        try {
+            kafkaConsumer = createConsumerClientWithByteSerialization(clusterDO, reqObj.getMaxMsgNum() + 1);
+            return fetchTopicData(kafkaConsumer, clusterDO, topicName, reqObj);
+        } catch (Exception e) {
+            LOGGER.error("create consumer failed, clusterDO:{} req:{}.", clusterDO, reqObj, e);
+        } finally {
+            if (kafkaConsumer != null) {
+                kafkaConsumer.close();
+            }
+        }
+        return new ArrayList<>();
+    }
+
     private List<String> fetchTopicData(KafkaConsumer kafkaConsumer, ClusterDO clusterDO, String topicName, TopicDataSampleDTO reqObj) {
         TopicMetadata topicMetadata = PhysicalClusterMetadataManager.getTopicMetadata(clusterDO.getId(), topicName);
         List<TopicPartition> tpList = new ArrayList<>();
@@ -598,12 +622,65 @@ public class TopicServiceImpl implements TopicService {
         return fetchTopicData(kafkaConsumer, reqObj.getMaxMsgNum(), reqObj.getTimeout().longValue(), reqObj.getTruncate(), tpList);
     }
 
+    private List<String> fetchTopicData(KafkaConsumer kafkaConsumer, ClusterDO clusterDO, String topicName, TopicDataSampleV2DTO reqObj) {
+        TopicMetadata topicMetadata = PhysicalClusterMetadataManager.getTopicMetadata(clusterDO.getId(), topicName);
+        List<TopicPartition> tpList = new ArrayList<>();
+        for (int partitionId = 0; partitionId < topicMetadata.getPartitionNum(); ++partitionId) {
+            // 当指定的分区为"-1"时，表示采样topic的所有分区
+            if (reqObj.getPartitionId() >= 0 && !ValidateUtils.isNull(reqObj.getPartitionId()) && !reqObj.getPartitionId().equals(partitionId)) {
+                continue;
+            }
+            tpList.add(new TopicPartition(topicName, partitionId));
+        }
+        if (ValidateUtils.isEmptyList(tpList)) {
+            return new ArrayList<>();
+        }
+
+        kafkaConsumer.assign(tpList);
+
+        Map<TopicPartition, Long> tpToOffsetMap = new HashMap<>();
+        Map<TopicPartition, Long> tpToEndOffsetsMap = kafkaConsumer.endOffsets(tpList);
+        // 获取offset
+        if (!ValidateUtils.isNull(reqObj.getByTimestamp()) && reqObj.getByTimestamp()) {
+            Map<TopicPartition, Long> tpToTimestamp = new HashMap<>();
+            for (TopicPartition topicPartition : tpList) {
+                Long timestamp = reqObj.getTimestampOrOffset();
+                tpToTimestamp.put(topicPartition, timestamp);
+            }
+            for (Object entry : kafkaConsumer.offsetsForTimes(tpToTimestamp).entrySet()) {
+                Map.Entry<TopicPartition, OffsetAndTimestamp> tpToOffsetAndTimestampEntry = (Map.Entry<TopicPartition, OffsetAndTimestamp>) entry;
+                tpToOffsetMap.put(tpToOffsetAndTimestampEntry.getKey(), tpToOffsetAndTimestampEntry.getValue().offset());
+            }
+        } else {
+            for (TopicPartition topicPartition : tpList) {
+                Long offset = reqObj.getTimestampOrOffset();
+                // 当指定的offset小于0时，从分区末尾开始消费
+                offset = offset > 0 ? offset : tpToEndOffsetsMap.get(topicPartition) + offset;
+                tpToOffsetMap.put(topicPartition, offset);
+            }
+        }
+
+        if (!ValidateUtils.isNull(reqObj.getTimestampOrOffset()) && tpList.size() >= 1) {
+            // 如若指定offset则从指定offset开始
+            for (Map.Entry<TopicPartition, Long> topicPartitionToOffsetEntry : tpToOffsetMap.entrySet()) {
+                TopicPartition tp = topicPartitionToOffsetEntry.getKey();
+                Long offset = topicPartitionToOffsetEntry.getValue();
+                // 若根据timestamp获取的offset为null，则将消费起始位置指定为分区的endOffset
+                offset = ValidateUtils.isNull(offset) ? tpToEndOffsetsMap.get(tp) : offset;
+                kafkaConsumer.seek(tp, offset);
+            }
+            return fetchTopicDataWithByteSerialization(kafkaConsumer, topicName, reqObj.getMaxMsgNum(), reqObj.getTimeout());
+        }
+        // 获取各个分区最新的数据
+        return fetchTopicDataWithByteSerialization(kafkaConsumer, topicName, reqObj.getMaxMsgNum(), reqObj.getTimeout().longValue(), tpList);
+    }
+
     @Override
     public List<String> fetchTopicData(KafkaConsumer kafkaConsumer,
-                                        Integer maxMsgNum,
-                                        Long maxWaitMs,
-                                        Boolean truncated,
-                                        List<TopicPartition> tpList) {
+                                       Integer maxMsgNum,
+                                       Long maxWaitMs,
+                                       Boolean truncated,
+                                       List<TopicPartition> tpList) {
         if (maxWaitMs <= 0) {
             return Collections.emptyList();
         }
@@ -633,6 +710,40 @@ public class TopicServiceImpl implements TopicService {
             }
             remainingWaitMs = maxWaitMs - elapsed;
         }
+        return dataList;
+    }
+
+    @Override
+    public List<String> fetchTopicDataWithByteSerialization(KafkaConsumer kafkaConsumer,
+                                                            String topic,
+                                                            Integer maxMsgNum,
+                                                            Long maxWaitMs,
+                                                            List<TopicPartition> tpList) {
+        if (maxWaitMs <= 0) {
+            return Collections.emptyList();
+        }
+        Map<TopicPartition, Long> endOffsetMap = kafkaConsumer.endOffsets(tpList);
+
+        Long remainingWaitMs = maxWaitMs;
+        List<String> dataList = new ArrayList<>(maxMsgNum);
+        Integer remainingMsgNum = maxMsgNum / tpList.size();
+        // 遍历所有分区最新的数据
+        for (Map.Entry<TopicPartition, Long> entry : endOffsetMap.entrySet()) {
+            if (remainingWaitMs <= 0) {
+                break;
+            }
+
+            Long startOffset;
+            if (entry.getKey().partition() == 0) {
+                startOffset = Math.max(0, entry.getValue() - (tpList.size() * remainingMsgNum) + remainingMsgNum);
+            } else {
+                startOffset = Math.max(0, entry.getValue() - remainingMsgNum);
+            }
+            kafkaConsumer.seek(entry.getKey(), startOffset);
+        }
+
+        dataList.addAll(fetchTopicDataNotRetryWithByteSerialization(kafkaConsumer, topic, remainingMsgNum, remainingWaitMs));
+
         return dataList;
     }
 
@@ -683,6 +794,66 @@ public class TopicServiceImpl implements TopicService {
         return dataList.subList(0, Math.min(dataList.size(), maxMsgNum));
     }
 
+    private List<String> fetchTopicDataNotRetryWithByteSerialization(KafkaConsumer kafkaConsumer,
+                                                                     String topic,
+                                                                     Integer maxMsgNum,
+                                                                     Long maxWaitMs) {
+        if (maxWaitMs <= 0) {
+            return Collections.emptyList();
+        }
+        long begin = System.currentTimeMillis();
+        long remainingWaitMs = maxWaitMs;
+
+        List<String> dataList = new ArrayList<>();
+        int currentSize = dataList.size();
+        while (dataList.size() < maxMsgNum) {
+            if (remainingWaitMs <= 0) {
+                break;
+            }
+
+            try {
+                ConsumerRecords<String, String> records = kafkaConsumer.poll(TopicSampleConstant.POLL_TIME_OUT_UNIT_MS);
+                ObjectMapper mapper = new ObjectMapper();
+                for (ConsumerRecord record : records) {
+                    JSONObject message = new JSONObject();
+                    message.put("partition", record.partition());
+                    message.put("offset", record.offset());
+                    message.put("timestamp", record.timestamp());
+                    String value;
+                    if (topic.contains("match_result_")) {
+                        MatchResult matchResult = MatchResultUtil.pbToEntity(MatchResultProtocol.MatchResult.parseFrom((byte[]) record.value()));
+                        value = mapper.writeValueAsString(matchResult);
+                    } else if (!topic.contains("sequence_") && !topic.contains("fallback_")) {
+                        value = new String((byte[]) record.value());
+                    } else if ((((byte[]) record.value()))[0] == 123) {
+                        value = new String((byte[]) record.value());
+                    } else {
+                        OrderSequence orderSequence = OrderSequence.pbToEntity(OrderSequenceProtocol.OrderSequence.parseFrom(((byte[]) record.value())));
+                        value = mapper.writeValueAsString(orderSequence);
+                    }
+                    message.put("value", value);
+                    dataList.add(message.toJSONString());
+                }
+            } catch (Exception e) {
+                LOGGER.error("fetch topic data failed, TopicPartitions:{}.", kafkaConsumer.assignment(), e);
+            }
+
+            // 当前批次一条数据都没拉取到，则结束拉取
+            if (dataList.size() - currentSize == 0) {
+                break;
+            }
+            currentSize = dataList.size();
+
+            // 检查是否超时
+            long elapsed = System.currentTimeMillis() - begin;
+            if (elapsed >= maxWaitMs) {
+                break;
+            }
+            remainingWaitMs = maxWaitMs - elapsed;
+        }
+        return dataList.subList(0, Math.min(dataList.size(), maxMsgNum));
+    }
+
     @Override
     public List<String> fetchTopicData(KafkaConsumer kafkaConsumer,
                                        Integer maxMsgNum,
@@ -701,6 +872,52 @@ public class TopicServiceImpl implements TopicService {
                                     value.substring(0, Math.min(value.length(), TopicSampleConstant.MAX_DATA_LENGTH_UNIT_BYTE))
                                     : value
                     );
+                }
+                Thread.sleep(10);
+            } catch (Exception e) {
+                LOGGER.error("fetch topic data failed, TopicPartitions:{}.", kafkaConsumer.assignment(), e);
+            }
+
+            if (System.currentTimeMillis() - timestamp > timeout || dataList.size() >= maxMsgNum) {
+                // 超时或者是数据已采集足够时, 直接返回
+                break;
+            }
+        }
+        return dataList.subList(0, Math.min(dataList.size(), maxMsgNum));
+    }
+
+    @Override
+    public List<String> fetchTopicDataWithByteSerialization(KafkaConsumer kafkaConsumer,
+                                                            String topic,
+                                                            Integer maxMsgNum,
+                                                            Integer timeout) {
+        List<String> dataList = new ArrayList<>();
+
+        long timestamp = System.currentTimeMillis();
+        ObjectMapper mapper = new ObjectMapper();
+        while (dataList.size() < maxMsgNum) {
+            try {
+                ConsumerRecords<String, String> records = kafkaConsumer.poll(TopicSampleConstant.POLL_TIME_OUT_UNIT_MS);
+
+                for (ConsumerRecord record : records) {
+                    JSONObject message = new JSONObject();
+                    message.put("partition", record.partition());
+                    message.put("offset", record.offset());
+                    message.put("timestamp", record.timestamp());
+                    String value;
+                    if (topic.contains("match_result_")) {
+                        MatchResult matchResult = MatchResultUtil.pbToEntity(MatchResultProtocol.MatchResult.parseFrom((byte[]) record.value()));
+                        value = mapper.writeValueAsString(matchResult);
+                    } else if (!topic.contains("sequence_") && !topic.contains("fallback_")) {
+                        value = new String((byte[]) record.value());
+                    } else if ((((byte[]) record.value()))[0] == 123) {
+                        value = new String((byte[]) record.value());
+                    } else {
+                        OrderSequence orderSequence = OrderSequence.pbToEntity(OrderSequenceProtocol.OrderSequence.parseFrom(((byte[]) record.value())));
+                        value = mapper.writeValueAsString(orderSequence);
+                    }
+                    message.put("value", value);
+                    dataList.add(message.toJSONString());
                 }
                 Thread.sleep(10);
             } catch (Exception e) {
@@ -786,6 +1003,14 @@ public class TopicServiceImpl implements TopicService {
         return new KafkaConsumer(properties);
     }
 
+    private KafkaConsumer createConsumerClientWithByteSerialization(ClusterDO clusterDO, Integer maxPollRecords) {
+        Properties properties = KafkaClientPool.createPropertiesWithByteSerialization(clusterDO, false);
+        properties.put("enable.auto.commit", false);
+        properties.put("max.poll.records", maxPollRecords);
+        properties.put("request.timeout.ms", 15000);
+        return new KafkaConsumer(properties);
+    }
+
     @Override
     public Result<TopicOffsetChangedEnum> checkTopicOffsetChanged(Long physicalClusterId,
                                                                   String topicName,
@@ -808,7 +1033,7 @@ public class TopicServiceImpl implements TopicService {
             }
 
             TopicOffsetChangedEnum offsetChangedEnum = TopicOffsetChangedEnum.NO;
-            for (PartitionOffsetDTO dto: dtoList) {
+            for (PartitionOffsetDTO dto : dtoList) {
                 Long endOffset = endOffsetMap.get(new TopicPartition(topicName, dto.getPartitionId()));
                 if (!ValidateUtils.isNull(endOffset) && endOffset > dto.getOffset()) {
                     // 任意分区的数据发生变化, 则表示有数据写入
@@ -824,7 +1049,7 @@ public class TopicServiceImpl implements TopicService {
             return new Result<>(TopicOffsetChangedEnum.NO);
         } catch (Exception e) {
             LOGGER.error("check topic expired failed, clusterId:{} topicName:{} latestTime:{}."
-                    ,physicalClusterId, topicName, latestTime);
+                    , physicalClusterId, topicName, latestTime);
         }
         return new Result<>(TopicOffsetChangedEnum.UNKNOWN);
     }
@@ -845,7 +1070,7 @@ public class TopicServiceImpl implements TopicService {
         }
 
         TopicOffsetChangedEnum changedEnum = TopicOffsetChangedEnum.NO;
-        for (Map.Entry<TopicPartition, Long> entry: endOffsetMap.entrySet()) {
+        for (Map.Entry<TopicPartition, Long> entry : endOffsetMap.entrySet()) {
             Long beginningOffset = beginningOffsetMap.get(entry.getKey());
             if (!ValidateUtils.isNull(beginningOffset) && beginningOffset < entry.getValue()) {
                 return new Result<>(TopicOffsetChangedEnum.YES);

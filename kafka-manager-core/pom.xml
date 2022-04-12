@@ -28,11 +28,21 @@
 
     <dependencies>
         <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>3.11.4</version>
+        </dependency>
+        <dependency>
             <groupId>com.xiaojukeji.kafka</groupId>
             <artifactId>kafka-manager-dao</artifactId>
             <version>${project.parent.version}</version>
         </dependency>
 
+        <!-- huobi -->
+        <dependency>
+            <groupId>com.huobi.riemann.emu</groupId>
+            <artifactId>message-service</artifactId>
+        </dependency>
         <!-- spring -->
         <dependency>
             <groupId>org.springframework</groupId>

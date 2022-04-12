@@ -7,6 +7,7 @@ import com.xiaojukeji.kafka.manager.common.entity.ResultStatus;
 import com.xiaojukeji.kafka.manager.common.entity.ao.topic.TopicConnection;
 import com.xiaojukeji.kafka.manager.common.entity.ao.topic.TopicPartitionDTO;
 import com.xiaojukeji.kafka.manager.common.entity.dto.normal.TopicDataSampleDTO;
+import com.xiaojukeji.kafka.manager.common.entity.dto.normal.TopicDataSampleV2DTO;
 import com.xiaojukeji.kafka.manager.common.entity.metrics.BaseMetrics;
 import com.xiaojukeji.kafka.manager.common.entity.vo.common.RealTimeMetricsVO;
 import com.xiaojukeji.kafka.manager.common.entity.vo.normal.TopicBusinessInfoVO;
@@ -243,7 +244,7 @@ public class NormalTopicController {
     public Result<List<TopicDataSampleVO>> previewTopic(
             @PathVariable Long clusterId,
             @PathVariable String topicName,
-            @RequestBody TopicDataSampleDTO reqObj) {
+            @RequestBody TopicDataSampleV2DTO reqObj) {
         reqObj.adjustConfig();
 
         Long physicalClusterId = logicalClusterMetadataManager.getPhysicalClusterId(clusterId, reqObj.getIsPhysicalClusterId());

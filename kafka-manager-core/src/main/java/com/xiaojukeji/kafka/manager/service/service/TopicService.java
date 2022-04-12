@@ -6,6 +6,7 @@ import com.xiaojukeji.kafka.manager.common.entity.Result;
 import com.xiaojukeji.kafka.manager.common.entity.ao.*;
 import com.xiaojukeji.kafka.manager.common.entity.dto.normal.TopicDataSampleDTO;
 import com.xiaojukeji.kafka.manager.common.entity.ao.topic.*;
+import com.xiaojukeji.kafka.manager.common.entity.dto.normal.TopicDataSampleV2DTO;
 import com.xiaojukeji.kafka.manager.common.entity.metrics.BaseMetrics;
 import com.xiaojukeji.kafka.manager.common.entity.pojo.TopicMetricsDO;
 import com.xiaojukeji.kafka.manager.common.entity.ao.topic.TopicBrokerDTO;
@@ -83,7 +84,12 @@ public interface TopicService {
      * 数据采样
      */
     List<String> fetchTopicData(ClusterDO clusterDO, String topicName, TopicDataSampleDTO reqObj);
+    List<String> fetchTopicData(ClusterDO clusterDO, String topicName, TopicDataSampleV2DTO reqObj);
     List<String> fetchTopicData(KafkaConsumer kafkaConsumer, Integer maxMsgNum, Integer timeout, Boolean truncated);
+    List<String> fetchTopicDataWithByteSerialization(KafkaConsumer kafkaConsumer,
+                                                            String topic,
+                                                            Integer maxMsgNum,
+                                                            Integer timeout);
 
     /**
      * 采样指定分区最新的数据
@@ -93,6 +99,11 @@ public interface TopicService {
                                 Long maxWaitMs,
                                 Boolean truncated,
                                 List<TopicPartition> tpList);
+    List<String> fetchTopicDataWithByteSerialization(KafkaConsumer kafkaConsumer,
+                                                            String topic,
+                                                            Integer maxMsgNum,
+                                                            Long maxWaitMs,
+                                                            List<TopicPartition> tpList);
 
     /**
      * 获取Topic历史耗时
